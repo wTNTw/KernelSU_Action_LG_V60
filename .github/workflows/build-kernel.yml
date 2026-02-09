@@ -39,8 +39,8 @@ jobs:
             CUSTOM_GCC_32_SOURCE
             CUSTOM_GCC_32_BRANCH
             CUSTOM_GCC_32_BIN
-            USE_BAZEL_BUILD
             ENABLE_KERNELSU
+            KERNELSU_TAG
             ADD_KPROBES_CONFIG
             DISABLE-LTO
             ADD_OVERLAYFS_CONFIG
@@ -90,15 +90,6 @@ jobs:
         sudo apt-get update
         sudo apt-get install git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
-
-    - name: Install Bazel
-      if: env.USE_BAZEL_BUILD == 'true'
-      run: |
-        sudo apt-get install apt-transport-https curl gnupg
-        curl -fsSL https://bazel.build/bazel-release.pub.gpg | sudo gpg --dearmor -o /usr/share/keyrings/bazel-archive-keyring.gpg
-        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
-        sudo apt-get update && sudo apt-get install bazel-6.4.0
-        sudo ln -sf /usr/bin/bazel-6.4.0 /usr/bin/bazel
 
     - name: Download Clang-aosp
       if: env.USE_CUSTOM_CLANG != 'true'
@@ -212,9 +203,9 @@ jobs:
       if: env.ENABLE_KERNELSU == 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
-        KSU_VERSION=$(cd KernelSU && expr $(/usr/bin/git rev-list --count HEAD) + 10200)
-        echo "UPLOADNAME=-KernelSU_$KSU_VERSION" >> $GITHUB_ENV
+        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s ${{ env.KERNELSU_TAG }}
+        KSU_VERSION=$(expr $(git ls-remote https://github.com/ReSukiSU/ReSukiSU refs/heads/${{ env.KERNELSU_TAG }} | cut -f1 | xargs git rev-list --count 2>/dev/null || echo 13000) + 30700)
+        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
 
     - name: Setup Configuration for Kernel
       run: |
@@ -254,21 +245,7 @@ jobs:
         key: build-kernel-${{ env.DEVICE }}${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}
         max-size: 2G
 
-    - name: Build kernel with Bazel
-      if: env.USE_BAZEL_BUILD == 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        export KBUILD_BUILD_HOST=Github-Action
-        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-        if [ ! -z ${{ env.KSU_EXPECTED_SIZE }} ] && [ ! -z ${{ env.KSU_EXPECTED_HASH }} ]; then
-          export KSU_EXPECTED_SIZE=${{ env.KSU_EXPECTED_SIZE }}
-          export KSU_EXPECTED_HASH=${{ env.KSU_EXPECTED_HASH }}
-        fi
-        tools/bazel build --config=fast //common:kernel_aarch64_dist
-
-    - name: Build kernel with Make
-      if: env.USE_BAZEL_BUILD != 'true'
+    - name: Build kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
@@ -288,38 +265,18 @@ jobs:
     - name: Check a kernel output files
       run: |
        cd $GITHUB_WORKSPACE/kernel_workspace
-       if [ ${{ env.USE_BAZEL_BUILD }} = true ]; then
-           # Bazel build output path
-           if [ -f android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/Image.gz ]; then
-               echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
-               echo "BAZEL_BUILD=true" >> $GITHUB_ENV
-           else
-               echo "Kernel output file is empty"
-               exit 1
-           fi
-           if [ ${{ env.NEED_DTBO }} = true ]; then
-               if [ -f android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/dtbo.img ]; then
-                   echo "CHECK_DTBO_IS_OK=true" >> $GITHUB_ENV
-               else
-                   echo "DTBO image is empty"
-                   exit 1
-               fi
-           fi
+       if [ -f android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} ]; then
+           echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
        else
-           # Make build output path
-           if [ -f android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} ]; then
-               echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
+           echo "Kernel output file is empty"
+           exit 1
+       fi
+       if [ ${{ env.NEED_DTBO }} = true ]; then
+           if [ -f android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img ]; then
+               echo "CHECK_DTBO_IS_OK=true" >> $GITHUB_ENV
            else
-               echo "Kernel output file is empty"
+               echo "DTBO image is empty"
                exit 1
-           fi
-           if [ ${{ env.NEED_DTBO }} = true ]; then
-               if [ -f android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img ]; then
-                   echo "CHECK_DTBO_IS_OK=true" >> $GITHUB_ENV
-               else
-                   echo "DTBO image is empty"
-                   exit 1
-               fi
            fi
        fi
 
@@ -331,16 +288,9 @@ jobs:
         sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
         sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
         sed -i 's/IS_SLOT_DEVICE=0;/is_slot_device=auto;/g' AnyKernel3/anykernel.sh
-        if [ ${{ env.USE_BAZEL_BUILD }} = true ]; then
-            cp android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/Image.gz AnyKernel3/
-            if [ ${{ env.CHECK_DTBO_IS_OK }} = true ]; then
-                cp android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/dtbo.img AnyKernel3/
-            fi
-        else
-            cp android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} AnyKernel3/
-            if [ ${{ env.CHECK_DTBO_IS_OK }} = true ]; then
-                cp android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img AnyKernel3/
-            fi
+        cp android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} AnyKernel3/
+        if [ ${{ env.CHECK_DTBO_IS_OK }} = true ]; then
+            cp android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img AnyKernel3/
         fi
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
@@ -361,16 +311,9 @@ jobs:
             mkdir AnyKernel3
             unzip AnyKernel3.zip -d AnyKernel3/
         fi
-        if [ ${{ env.USE_BAZEL_BUILD }} = true ]; then
-            cp android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/Image.gz AnyKernel3/
-            if [ ${{ env.CHECK_DTBO_IS_OK }} = true ]; then
-                cp android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/dtbo.img AnyKernel3/
-            fi
-        else
-            cp android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} AnyKernel3/
-            if [ ${{ env.CHECK_DTBO_IS_OK }} = true ]; then
-                cp android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img AnyKernel3/
-            fi
+        cp android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} AnyKernel3/
+        if [ ${{ env.CHECK_DTBO_IS_OK }} = true ]; then
+            cp android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img AnyKernel3/
         fi
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
@@ -379,11 +322,7 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         tools/unpack_bootimg.py --boot_img boot-source.img
-        if [ ${{ env.USE_BAZEL_BUILD }} = true ]; then
-            cp android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/Image.gz out/kernel
-        else
-            cp android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} out/kernel
-        fi
+        cp android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} out/kernel
         tools/mkbootimg.py ${{ env.FORMAT_MKBOOTING }} -o boot.img
         if [ -f boot.img ]; then
             echo "MAKE_BOOT_IMAGE_IS_OK=true" >> $GITHUB_ENV
@@ -397,9 +336,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.KERNEL_IMAGE_NAME }}${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
-        path: |
-          kernel_workspace/android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}
-          kernel_workspace/android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/Image.gz
+        path: kernel_workspace/android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}
 
     - name: Upload AnyKernel3
       if: env.CHECK_FILE_IS_OK == 'true'
@@ -413,9 +350,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: dtbo-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
-        path: |
-          kernel_workspace/android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img
-          kernel_workspace/android-kernel/bazel-out/k8-fastbuild/bin/common/kernel_aarch64_dist/dtbo.img
+        path: kernel_workspace/android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img
 
     - name: Upload boot image
       if: env.MAKE_BOOT_IMAGE_IS_OK == 'true'
